@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.dev/
+*.log
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+backend/supabase-config.json
+backend/paymongo-config.json

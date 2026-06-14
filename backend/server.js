@@ -1,0 +1,471 @@
+const express = require('express');
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
+
+// Load Supabase config (env vars take precedence over config file)
+let supabaseConfig = {
+  supabaseUrl: process.env.SUPABASE_URL || '',
+  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+}
+const SUPABASE_CONFIG_PATH = path.join(__dirname, 'supabase-config.json')
+try {
+  if (fs.existsSync(SUPABASE_CONFIG_PATH)) {
+    const fileConfig = JSON.parse(fs.readFileSync(SUPABASE_CONFIG_PATH, 'utf-8'))
+    supabaseConfig.supabaseUrl = supabaseConfig.supabaseUrl || fileConfig.supabaseUrl || ''
+    supabaseConfig.serviceRoleKey = supabaseConfig.serviceRoleKey || fileConfig.serviceRoleKey || ''
+  }
+} catch {}
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+const DB_PATH = path.join(__dirname, 'data', 'db.json');
+const PAYMENTS_PATH = path.join(__dirname, 'data', 'payments.json');
+
+// Load PayMongo config from file or env var
+let paymongoConfig = { secretKey: '', webhookSecret: '' }
+const CONFIG_PATH = path.join(__dirname, 'paymongo-config.json')
+try {
+  if (fs.existsSync(CONFIG_PATH)) {
+    paymongoConfig = { ...paymongoConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')) }
+  }
+} catch {}
+const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY || paymongoConfig.secretKey || '';
+const PAYMONGO_API = 'https://api.paymongo.com/v1';
+
+function getPaymongoAuth() {
+  return Buffer.from(PAYMONGO_SECRET_KEY + ':').toString('base64');
+}
+
+function isPaymongoConfigured() {
+  return PAYMONGO_SECRET_KEY.length > 0;
+}
+
+function readPayments() {
+  try { return JSON.parse(fs.readFileSync(PAYMENTS_PATH, 'utf-8')) }
+  catch { return [] }
+}
+
+function writePayments(data) {
+  fs.writeFileSync(PAYMENTS_PATH, JSON.stringify(data, null, 2))
+}
+
+app.use(cors());
+app.use(express.json());
+
+function readDB() {
+  return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+}
+
+function writeDB(data) {
+  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+}
+
+// Auth endpoint
+app.post('/api/login', (req, res) => {
+  const { email, password } = req.body;
+  const db = readDB();
+  const user = db.users.find(u => u.email === email && u.password === password);
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  const { password: _, ...safeUser } = user;
+  res.json({ user: safeUser, token: `token-${user.id}-${Date.now()}` });
+});
+
+// Menu endpoints
+app.get('/api/menu', (req, res) => {
+  const db = readDB();
+  res.json(db.menu.filter(m => m.available));
+});
+
+app.get('/api/menu/all', (req, res) => {
+  const db = readDB();
+  res.json(db.menu);
+});
+
+app.put('/api/menu/:id', (req, res) => {
+  const db = readDB();
+  const idx = db.menu.findIndex(m => m.id === parseInt(req.params.id));
+  if (idx === -1) return res.status(404).json({ error: 'Menu item not found' });
+  db.menu[idx] = { ...db.menu[idx], ...req.body };
+  writeDB(db);
+  res.json(db.menu[idx]);
+});
+
+app.post('/api/menu', (req, res) => {
+  const db = readDB();
+  const item = { id: Date.now(), ...req.body, available: true };
+  db.menu.push(item);
+  writeDB(db);
+  res.status(201).json(item);
+});
+
+app.delete('/api/menu/:id', (req, res) => {
+  const db = readDB();
+  db.menu = db.menu.filter(m => m.id !== parseInt(req.params.id));
+  writeDB(db);
+  res.json({ success: true });
+});
+
+// Order endpoints
+app.get('/api/orders', (req, res) => {
+  const db = readDB();
+  const { role, userId, status } = req.query;
+  let orders = [...db.orders];
+  if (userId) orders = orders.filter(o => o.userId === parseInt(userId));
+  if (status) orders = orders.filter(o => o.status === status);
+  if (role === 'cook') orders = orders.filter(o => o.status === 'pending' || o.status === 'preparing');
+  orders.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  res.json(orders);
+});
+
+app.post('/api/orders', (req, res) => {
+  const db = readDB();
+  const { userId, customerName, tableNumber, type, items } = req.body;
+  const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const order = {
+    id: `ORD-${String(db.orders.length + 1).padStart(3, '0')}`,
+    userId, customerName, tableNumber, type,
+    status: 'pending',
+    items, total,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  db.orders.push(order);
+  writeDB(db);
+  res.status(201).json(order);
+});
+
+app.get('/api/orders/:id', (req, res) => {
+  const db = readDB();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  res.json(order);
+});
+
+app.get('/api/menu/available', (req, res) => {
+  const db = readDB();
+  res.json(db.menu.filter(m => m.available));
+});
+
+app.put('/api/orders/:id', (req, res) => {
+  const db = readDB();
+  const idx = db.orders.findIndex(o => o.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Order not found' });
+  db.orders[idx] = { ...db.orders[idx], ...req.body, updatedAt: new Date().toISOString() };
+  writeDB(db);
+  res.json(db.orders[idx]);
+});
+
+// Cook: mark order item as done
+app.put('/api/orders/:id/items/:itemId/done', (req, res) => {
+  const db = readDB();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const item = order.items.find(i => i.menuItemId === parseInt(req.params.itemId));
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  item.done = true;
+  const allDone = order.items.every(i => i.done);
+  if (allDone) order.status = 'ready';
+  order.updatedAt = new Date().toISOString();
+  writeDB(db);
+  res.json(order);
+});
+
+// Admin: Sales report
+app.get('/api/admin/sales', (req, res) => {
+  const db = readDB();
+  const { period } = req.query;
+  const orders = db.orders.filter(o => o.status === 'ready' || o.status === 'delivered');
+  const totalSales = orders.reduce((sum, o) => sum + o.total, 0);
+  const totalOrders = orders.length;
+  const categorySales = {};
+  db.menu.forEach(m => {
+    categorySales[m.category] = 0;
+  });
+  orders.forEach(o => {
+    o.items.forEach(item => {
+      const menuItem = db.menu.find(m => m.id === item.menuItemId);
+      if (menuItem) {
+        categorySales[menuItem.category] = (categorySales[menuItem.category] || 0) + item.price * item.quantity;
+      }
+    });
+  });
+  res.json({ totalSales, totalOrders, categorySales, orders });
+});
+
+app.get('/api/admin/summary', (req, res) => {
+  const db = readDB();
+  const totalOrders = db.orders.length;
+  const pendingOrders = db.orders.filter(o => o.status === 'pending').length;
+  const preparingOrders = db.orders.filter(o => o.status === 'preparing').length;
+  const readyOrders = db.orders.filter(o => o.status === 'ready').length;
+  const totalRevenue = db.orders.reduce((sum, o) => sum + o.total, 0);
+  const menuItems = db.menu.length;
+  res.json({ totalOrders, pendingOrders, preparingOrders, readyOrders, totalRevenue, menuItems });
+});
+
+// ===== PayMongo Payment Integration =====
+
+// PayMongo-supported payment method types
+const PAYMONGO_METHODS = {
+  gcash: { label: 'GCash', icon: '📱' },
+  maya: { label: 'Maya', icon: '📱' },
+  grab_pay: { label: 'GrabPay', icon: '📱' },
+  card: { label: 'Credit/Debit Card', icon: '💳' },
+}
+
+// GET /api/payments/config - return PayMongo availability and supported methods
+app.get('/api/payments/config', (req, res) => {
+  res.json({
+    configured: isPaymongoConfigured(),
+    methods: isPaymongoConfigured() ? Object.entries(PAYMONGO_METHODS).map(([key, val]) => ({
+      type: key,
+      ...val,
+    })) : [],
+  })
+})
+
+// POST /api/payments/create-source - create PayMongo source for payment
+app.post('/api/payments/create-source', async (req, res) => {
+  if (!isPaymongoConfigured()) {
+    return res.status(400).json({ error: 'PayMongo is not configured' })
+  }
+
+  try {
+    const { type, amount, successUrl, failedUrl } = req.body
+
+    if (!PAYMONGO_METHODS[type]) {
+      return res.status(400).json({ error: `Unsupported payment type: ${type}` })
+    }
+
+    const response = await axios.post(`${PAYMONGO_API}/sources`, {
+      data: {
+        attributes: {
+          type,
+          amount: Math.round(amount),
+          currency: 'PHP',
+          redirect: {
+            success: successUrl,
+            failed: failedUrl,
+          },
+        },
+      },
+    }, {
+      headers: {
+        'Authorization': `Basic ${getPaymongoAuth()}`,
+        'Content-Type': 'application/json',
+      },
+    })
+
+    const source = response.data.data
+    const attrs = source.attributes
+
+    // Track in local payments file
+    const payments = readPayments()
+    payments.push({
+      sourceId: source.id,
+      orderRef: req.body.orderRef || '',
+      amount: Math.round(amount),
+      type,
+      status: attrs.status,
+      createdAt: new Date().toISOString(),
+    })
+    writePayments(payments)
+
+    res.json({
+      sourceId: source.id,
+      checkoutUrl: attrs.redirect.checkout_url,
+      status: attrs.status,
+    })
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('PayMongo create-source error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to create payment source', detail })
+  }
+})
+
+// POST /api/payments/webhook - receive PayMongo webhooks
+app.post('/api/payments/webhook', async (req, res) => {
+  const event = req.body.data
+  if (!event) return res.status(400).json({ error: 'Invalid webhook payload' })
+
+  const attrs = event.attributes
+  const eventType = attrs?.type
+
+  if (eventType === 'source.chargeable') {
+    const sourceData = attrs?.data
+    const sourceId = sourceData?.id
+    const sourceAttrs = sourceData?.attributes
+    const amount = sourceAttrs?.amount
+
+    if (sourceId && amount) {
+      try {
+        const response = await axios.post(`${PAYMONGO_API}/payments`, {
+          data: {
+            attributes: {
+              amount,
+              currency: 'PHP',
+              source: { id: sourceId },
+            },
+          },
+        }, {
+          headers: {
+            'Authorization': `Basic ${getPaymongoAuth()}`,
+            'Content-Type': 'application/json',
+          },
+        })
+
+        const paymentId = response.data.data.id
+
+        // Update payments tracking
+        const payments = readPayments()
+        const pidx = payments.findIndex(p => p.sourceId === sourceId)
+        if (pidx !== -1) {
+          payments[pidx].status = 'charged'
+          payments[pidx].paymentId = paymentId
+          writePayments(payments)
+        }
+
+        // Update order in db if linked
+        const db = readDB()
+        const orderIdx = db.orders.findIndex(o => o.paymongoSourceId === sourceId)
+        if (orderIdx !== -1) {
+          db.orders[orderIdx].paymentStatus = 'paid'
+          db.orders[orderIdx].paymongoPaymentId = paymentId
+          writeDB(db)
+        }
+      } catch (err) {
+        console.error('PayMongo charge error:', err.response?.data || err.message)
+      }
+    }
+  } else if (eventType === 'payment.paid') {
+    const paymentData = attrs?.data
+    const sourceId = paymentData?.attributes?.source?.id
+    const paymentId = paymentData?.id
+
+    if (sourceId) {
+      const db = readDB()
+      const orderIdx = db.orders.findIndex(o => o.paymongoSourceId === sourceId)
+      if (orderIdx !== -1) {
+        db.orders[orderIdx].paymentStatus = 'paid'
+        db.orders[orderIdx].paymongoPaymentId = paymentId
+        writeDB(db)
+      }
+
+      const payments = readPayments()
+      const pidx = payments.findIndex(p => p.sourceId === sourceId)
+      if (pidx !== -1) {
+        payments[pidx].status = 'paid'
+        payments[pidx].paymentId = paymentId
+        writePayments(payments)
+      }
+    }
+  } else if (eventType === 'payment.failed') {
+    const sourceId = attrs?.data?.attributes?.source?.id
+    if (sourceId) {
+      const db = readDB()
+      const orderIdx = db.orders.findIndex(o => o.paymongoSourceId === sourceId)
+      if (orderIdx !== -1) {
+        db.orders[orderIdx].paymentStatus = 'failed'
+        writeDB(db)
+      }
+
+      const payments = readPayments()
+      const pidx = payments.findIndex(p => p.sourceId === sourceId)
+      if (pidx !== -1) {
+        payments[pidx].status = 'failed'
+        writePayments(payments)
+      }
+    }
+  }
+
+  res.json({ received: true })
+})
+
+// GET /api/payments/:sourceId/status - poll payment status
+app.get('/api/payments/:sourceId/status', (req, res) => {
+  const { sourceId } = req.params
+
+  // Check local db first
+  const db = readDB()
+  const order = db.orders.find(o => o.paymongoSourceId === sourceId)
+  if (order) {
+    return res.json({
+      paymentStatus: order.paymentStatus || 'pending',
+      paymongoPaymentId: order.paymongoPaymentId || null,
+    })
+  }
+
+  // Check payments tracking
+  const payments = readPayments()
+  const payment = payments.find(p => p.sourceId === sourceId)
+  if (payment) {
+    return res.json({
+      paymentStatus: payment.status === 'paid' || payment.status === 'charged' ? 'paid' : payment.status,
+      paymongoPaymentId: payment.paymentId || null,
+    })
+  }
+
+  res.json({ paymentStatus: 'unknown' })
+})
+
+// Admin: List all auth users (for orphan cleanup)
+app.get('/api/admin/auth-users', async (req, res) => {
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+
+  try {
+    const response = await axios.get(
+      `${supabaseConfig.supabaseUrl}/auth/v1/admin/users`,
+      {
+        headers: {
+          'Authorization': `Bearer ${supabaseConfig.serviceRoleKey}`,
+          'apikey': supabaseConfig.serviceRoleKey,
+        },
+      }
+    )
+    const users = response.data?.users || []
+    res.json(users.map(u => ({
+      id: u.id,
+      email: u.email,
+      createdAt: u.created_at,
+      lastSignIn: u.last_sign_in_at,
+    })))
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('List auth users error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to list auth users', detail })
+  }
+})
+
+// Admin: Delete Supabase auth user
+app.post('/api/admin/delete-user', async (req, res) => {
+  const { userId } = req.body
+  if (!userId) return res.status(400).json({ error: 'userId required' })
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+
+  try {
+    const response = await axios.delete(
+      `${supabaseConfig.supabaseUrl}/auth/v1/admin/users/${userId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${supabaseConfig.serviceRoleKey}`,
+          'apikey': supabaseConfig.serviceRoleKey,
+        },
+      }
+    )
+    res.json({ success: true, deleted: response.data })
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('Delete auth user error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to delete auth user', detail })
+  }
+})
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Restaurant API running on http://0.0.0.0:${PORT}`);
+});

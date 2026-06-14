@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: restaurant-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: SUPABASE_URL
+        value: https://pusdssjwtjdkcdgslopc.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: PAYMONGO_SECRET_KEY
+        sync: false

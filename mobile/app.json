@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "Restaurant App",
+    "slug": "restaurant-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#E67E22"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.restaurant.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#E67E22"
+      },
+      "package": "com.restaurant.app"
+    },
+    "plugins": [
+      "expo-asset",
+      "expo-font"
+    ]
+  }
+}
