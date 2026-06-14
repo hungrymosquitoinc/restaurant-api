@@ -20,8 +20,8 @@ export async function toggleUserActive(userId) {
 }
 
 export async function deleteUser(userId) {
-  const { data: profile } = await supabase.from('profiles').select('role').eq('id', userId).single()
-  if (!profile || profile.role === 'admin') return null
+  const { data: profile } = await supabase.from('profiles').select('role,is_super_admin').eq('id', userId).single()
+  if (!profile || profile.is_super_admin) return null
   const { error: profileError } = await supabase.from('profiles').delete().eq('id', userId)
   if (profileError) throw profileError
   try {

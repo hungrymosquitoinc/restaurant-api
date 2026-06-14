@@ -64,7 +64,8 @@ export default function AdminUsers() {
   }
 
   const handleDelete = (user) => {
-    if (user.role === 'admin' || user.isSuperAdmin) return
+    if (user.isSuperAdmin) return
+    if (user.role === 'admin' && !user?.isSuperAdmin) return
     setDeleteTarget(user)
   }
 
@@ -173,13 +174,13 @@ export default function AdminUsers() {
                   <input type="checkbox" checked={u.isActive} onChange={() => handleToggle(u.id)} />
                   <span className="toggle-slider">{u.isActive ? 'Active' : 'Inactive'}</span>
                 </label>
-                {u.role === 'cook' && (
+                {(u.role === 'cook' || (u.role === 'admin' && user?.is_super_admin)) && (
                   <button className="btn btn-sm" onClick={() => handleEditName(u)}
                     style={{ minWidth: 44, padding: '8px 12px', fontSize: '1rem' }}>
                     ✏
                   </button>
                 )}
-                {u.role !== 'admin' && !u.isSuperAdmin && (
+                {!u.isSuperAdmin && (u.role !== 'admin' || user?.is_super_admin) && (
                   <button className="btn btn-sm btn-danger" onClick={() => handleDelete(u)}
                     style={{ minWidth: 44, padding: '8px 12px', fontSize: '1rem' }}>
                     🗑
