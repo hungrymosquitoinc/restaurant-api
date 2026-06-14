@@ -521,6 +521,176 @@ app.post('/api/admin/delete-user', async (req, res) => {
   }
 })
 
+// ===== Saved Sales Reports =====
+
+function getPeriodRange(periodType, periodDate) {
+  const d = periodDate ? new Date(periodDate) : new Date()
+  let start, end, label
+  const pad = n => String(n).padStart(2, '0')
+  switch (periodType) {
+    case 'daily':
+      start = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
+      end = start
+      label = start
+      break
+    case 'monthly':
+      start = `${d.getFullYear()}-${pad(d.getMonth()+1)}-01`
+      end = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${new Date(d.getFullYear(), d.getMonth()+1, 0).getDate()}`
+      label = `${d.getFullYear()}-${pad(d.getMonth()+1)}`
+      break
+    case 'quarterly': {
+      const q = Math.floor(d.getMonth() / 3) * 3 + 1
+      start = `${d.getFullYear()}-${pad(q)}-01`
+      end = `${d.getFullYear()}-${pad(q+2)}-${new Date(d.getFullYear(), q+2, 0).getDate()}`
+      label = `Q${Math.ceil((d.getMonth()+1)/3)} ${d.getFullYear()}`
+      break
+    }
+    case 'yearly':
+      start = `${d.getFullYear()}-01-01`
+      end = `${d.getFullYear()}-12-31`
+      label = `${d.getFullYear()}`
+      break
+  }
+  return { start, end, label }
+}
+
+// Save a report snapshot
+app.post('/api/admin/save-report', async (req, res) => {
+  const { periodType, periodDate } = req.body
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+  if (!periodType) return res.status(400).json({ error: 'periodType required (daily/monthly/quarterly/yearly)' })
+
+  try {
+    const { start, end, label } = getPeriodRange(periodType, periodDate)
+    const headers = { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey }
+
+    // Fetch orders in date range
+    const ordersRes = await axios.get(
+      `${supabaseConfig.supabaseUrl}/rest/v1/orders?created_at=gte.${start}&created_at=lte.${end}T23:59:59&order=created_at.desc`,
+      { headers }
+    )
+    const orders = ordersRes.data || []
+    const completed = orders.filter(o => o.status !== 'cancelled')
+
+    // Compute stats
+    const totalRevenue = completed.reduce((s, o) => s + parseFloat(o.total || 0), 0)
+    const totalOrders = completed.length
+    const avgOrder = totalOrders > 0 ? totalRevenue / totalOrders : 0
+    const dineIn = completed.filter(o => o.order_type === 'dine-in').length
+    const takeout = completed.filter(o => o.order_type === 'takeout' || !o.order_type).length
+    const guestOrders = completed.filter(o => !o.user_id).length
+
+    const itemCounts = {}
+    completed.forEach(o => (o.items || []).forEach(i => {
+      itemCounts[i.name] = (itemCounts[i.name] || 0) + (i.quantity || 0)
+    }))
+    const popularItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, qty]) => ({ name, qty }))
+
+    const catRevenue = {}
+    completed.forEach(o => (o.items || []).forEach(i => {
+      const cat = i.category || 'Other'
+      catRevenue[cat] = (catRevenue[cat] || 0) + parseFloat(i.price || 0) * (i.quantity || 0)
+    }))
+    const revenueByCategory = Object.entries(catRevenue).map(([cat, rev]) => ({ category: cat, revenue: rev }))
+
+    const paymentMethods = {}
+    completed.forEach(o => {
+      const method = o.payment?.method || 'Cash on Delivery'
+      if (!paymentMethods[method]) paymentMethods[method] = { count: 0, revenue: 0 }
+      paymentMethods[method].count++
+      paymentMethods[method].revenue += parseFloat(o.total || 0)
+    })
+    const paymentMethodsArr = Object.entries(paymentMethods).map(([method, data]) => ({ method, ...data }))
+
+    const dayTotals = {}
+    completed.forEach(o => {
+      const d = new Date(o.created_at).toLocaleDateString()
+      dayTotals[d] = (dayTotals[d] || 0) + 1
+    })
+    const dailyBreakdown = Object.entries(dayTotals).map(([day, count]) => ({ day, count }))
+
+    const orderDetails = completed.map(o => ({
+      id: o.display_id || o.id,
+      total: parseFloat(o.total || 0),
+      items: (o.items || []).map(i => `${i.name} x${i.quantity}`),
+      orderType: o.order_type,
+      payment: o.payment?.method || 'Cash',
+      guestName: o.guest_name || null,
+      createdAt: o.created_at,
+    }))
+
+    // Save to sales_reports table
+    const reportData = {
+      period_date: start,
+      period_type: periodType,
+      label,
+      total_revenue: totalRevenue,
+      total_orders: totalOrders,
+      avg_order_value: avgOrder,
+      dine_in_count: dineIn,
+      takeout_count: takeout,
+      guest_orders: guestOrders,
+      popular_items: JSON.stringify(popularItems),
+      revenue_by_category: JSON.stringify(revenueByCategory),
+      payment_methods: JSON.stringify(paymentMethodsArr),
+      daily_breakdown: JSON.stringify(dailyBreakdown),
+      order_details: JSON.stringify(orderDetails),
+    }
+
+    const saveRes = await axios.post(
+      `${supabaseConfig.supabaseUrl}/rest/v1/sales_reports`,
+      reportData,
+      { headers: { ...headers, 'Content-Type': 'application/json', Prefer: 'return=representation' } }
+    )
+
+    res.json(saveRes.data?.[0] || saveRes.data || { saved: true })
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('Save report error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to save report', detail })
+  }
+})
+
+// List saved reports
+app.get('/api/admin/saved-reports', async (req, res) => {
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+  try {
+    const headers = { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey }
+    const r = await axios.get(
+      `${supabaseConfig.supabaseUrl}/rest/v1/sales_reports?order=created_at.desc`,
+      { headers }
+    )
+    res.json(r.data || [])
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('List saved reports error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to list saved reports', detail })
+  }
+})
+
+// Delete a saved report
+app.delete('/api/admin/saved-reports/:id', async (req, res) => {
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+  try {
+    const headers = { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey }
+    await axios.delete(
+      `${supabaseConfig.supabaseUrl}/rest/v1/sales_reports?id=eq.${req.params.id}`,
+      { headers }
+    )
+    res.json({ success: true })
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('Delete saved report error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to delete saved report', detail })
+  }
+})
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Restaurant API running on http://0.0.0.0:${PORT}`);
 });

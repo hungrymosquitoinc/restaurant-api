@@ -1,5 +1,6 @@
-import { useMemo, useState, useRef } from 'react'
+import { useMemo, useState, useRef, useEffect } from 'react'
 import { useOrder } from '../contexts/OrderContext'
+import { saveReport, getSavedReports, deleteSavedReport } from '../data/reports'
 
 function getPeriodRange(period, customStart, customEnd) {
   const now = new Date()
@@ -41,7 +42,34 @@ export default function AdminReports() {
   const [period, setPeriod] = useState('all')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')
+  const [savedReports, setSavedReports] = useState([])
+  const [saveMsg, setSaveMsg] = useState('')
+  const [viewingReport, setViewingReport] = useState(null)
   const printRef = useRef(null)
+
+  useEffect(() => { getSavedReports().then(setSavedReports).catch(() => {}) }, [])
+
+  const handleSaveReport = async () => {
+    const typeMap = { today: 'daily', week: 'daily', month: 'monthly', year: 'yearly', all: 'yearly', custom: 'daily' }
+    const periodType = typeMap[period] || 'daily'
+    setSaveMsg('Saving...')
+    try {
+      await saveReport(periodType)
+      setSaveMsg('Report saved!')
+      const updated = await getSavedReports()
+      setSavedReports(updated)
+    } catch (e) {
+      setSaveMsg('Failed: ' + e.message)
+    }
+    setTimeout(() => setSaveMsg(''), 3000)
+  }
+
+  const handleDeleteReport = async (id) => {
+    if (!window.confirm('Delete this saved report?')) return
+    await deleteSavedReport(id)
+    setSavedReports(prev => prev.filter(r => r.id !== id))
+    if (viewingReport?.id === id) setViewingReport(null)
+  }
 
   const { start, end } = getPeriodRange(period, customStart, customEnd)
 
@@ -101,9 +129,13 @@ export default function AdminReports() {
     <div className="admin-page">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
         <h1 style={{ margin: 0 }}>Sales & Reports</h1>
-        <button className="btn btn-sm" onClick={() => window.print()} style={{ minWidth: 100 }}>
-          🖨️ Print / Save PDF
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {saveMsg && <span style={{ fontSize: '0.85rem', color: saveMsg.includes('Failed') ? 'var(--error)' : 'var(--success)' }}>{saveMsg}</span>}
+          <button className="btn btn-sm btn-primary" onClick={handleSaveReport}>💾 Save Report</button>
+          <button className="btn btn-sm" onClick={() => window.print()} style={{ minWidth: 100 }}>
+            🖨️ Print / Save PDF
+          </button>
+        </div>
       </div>
 
       <div className="filter-tabs">
@@ -234,6 +266,64 @@ export default function AdminReports() {
           </section>
         )}
       </div>
+
+      <section style={{ marginTop: 40 }}>
+        <h2>Saved Reports</h2>
+        {savedReports.length === 0 ? (
+          <p className="text-muted">No saved reports yet. Click "Save Report" above to create one.</p>
+        ) : (
+          <div className="admin-menu-list">
+            {savedReports.map(r => (
+              <div key={r.id} className="admin-menu-item" style={{ cursor: 'pointer' }} onClick={() => setViewingReport(viewingReport?.id === r.id ? null : r)}>
+                <div className="admin-menu-info">
+                  <div style={{ flex: 1 }}>
+                    <strong>{r.label}</strong>
+                    <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', margin: '2px 0' }}>
+                      {r.period_type} · ₱{r.total_revenue} · {r.total_orders} orders · {new Date(r.created_at).toLocaleDateString()}
+                    </p>
+                    {viewingReport?.id === r.id && (
+                      <div style={{ marginTop: 8, padding: 12, background: 'var(--bg-secondary)', borderRadius: 8, fontSize: '0.85rem' }}>
+                        <div className="stats-grid" style={{ marginBottom: 12 }}>
+                          <div className="stat-card revenue"><span className="stat-value">₱{r.total_revenue}</span><span className="stat-label">Revenue</span></div>
+                          <div className="stat-card"><span className="stat-value">{r.total_orders}</span><span className="stat-label">Orders</span></div>
+                          <div className="stat-card"><span className="stat-value">₱{r.avg_order_value}</span><span className="stat-label">Avg Order</span></div>
+                        </div>
+                        <div className="stats-grid" style={{ marginBottom: 12 }}>
+                          <div className="stat-card"><span className="stat-value">{r.dine_in_count}</span><span className="stat-label">Dine In</span></div>
+                          <div className="stat-card"><span className="stat-value">{r.takeout_count}</span><span className="stat-label">Takeout</span></div>
+                          <div className="stat-card"><span className="stat-value">{r.guest_orders}</span><span className="stat-label">Guests</span></div>
+                        </div>
+                        {Array.isArray(r.popular_items) && r.popular_items.length > 0 && (
+                          <div style={{ marginBottom: 8 }}>
+                            <strong>Popular Items</strong>
+                            {r.popular_items.map((item, i) => (
+                              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+                                <span>{item.name}</span><span>{item.qty} sold</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {Array.isArray(r.revenue_by_category) && r.revenue_by_category.length > 0 && (
+                          <div style={{ marginBottom: 8 }}>
+                            <strong>Revenue by Category</strong>
+                            {r.revenue_by_category.map((cat, i) => (
+                              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+                                <span>{cat.category}</span><span>₱{cat.revenue}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <button className="btn btn-sm btn-danger" onClick={(e) => { e.stopPropagation(); handleDeleteReport(r.id) }}
+                  style={{ minWidth: 44, padding: '8px 12px', fontSize: '1rem' }}>🗑</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   )
 }
