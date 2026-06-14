@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const axios = require('axios');
 
 // Load Supabase config (env vars take precedence over config file)
@@ -495,6 +496,27 @@ app.post('/api/admin/add-admin', async (req, res) => {
   }
 })
 
+// Admin: Update user email via Supabase Admin API
+app.post('/api/admin/update-email', async (req, res) => {
+  const { userId, email } = req.body
+  if (!userId || !email) return res.status(400).json({ error: 'userId and email required' })
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+  try {
+    const response = await axios.put(
+      `${supabaseConfig.supabaseUrl}/auth/v1/admin/users/${userId}`,
+      { email },
+      { headers: { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey, 'Content-Type': 'application/json' } }
+    )
+    res.json({ success: true, user: response.data })
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('Update email error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to update email', detail })
+  }
+})
+
 // Admin: Delete Supabase auth user
 app.post('/api/admin/delete-user', async (req, res) => {
   const { userId } = req.body
@@ -533,6 +555,18 @@ function getPeriodRange(periodType, periodDate) {
       end = start
       label = start
       break
+    case 'weekly': {
+      const day = d.getDay()
+      const diff = d.getDate() - day + (day === 0 ? -6 : 1)
+      const mon = new Date(d)
+      mon.setDate(diff)
+      start = `${mon.getFullYear()}-${pad(mon.getMonth()+1)}-${pad(mon.getDate())}`
+      const sun = new Date(mon)
+      sun.setDate(sun.getDate() + 6)
+      end = `${sun.getFullYear()}-${pad(sun.getMonth()+1)}-${pad(sun.getDate())}`
+      label = `Week of ${start}`
+      break
+    }
     case 'monthly':
       start = `${d.getFullYear()}-${pad(d.getMonth()+1)}-01`
       end = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${new Date(d.getFullYear(), d.getMonth()+1, 0).getDate()}`
@@ -630,16 +664,16 @@ async function computeAndSaveReport(periodType, periodDate, headers) {
     period_date: start, period_type: periodType, label,
     total_revenue: totalRevenue, total_orders: totalOrders, avg_order_value: avgOrder,
     dine_in_count: dineIn, takeout_count: takeout, guest_orders: guestOrders,
-    popular_items: JSON.stringify(popularItems),
-    revenue_by_category: JSON.stringify(revenueByCategory),
-    payment_methods: JSON.stringify(paymentMethodsArr),
-    daily_breakdown: JSON.stringify(dailyBreakdown),
-    order_details: JSON.stringify(completed.map(o => ({
+    popular_items: popularItems,
+    revenue_by_category: revenueByCategory,
+    payment_methods: paymentMethodsArr,
+    daily_breakdown: dailyBreakdown,
+    order_details: completed.map(o => ({
       id: o.display_id || o.id, total: parseFloat(o.total || 0),
       items: (o.items || []).map(i => `${i.name} x${i.quantity}`),
       orderType: o.order_type, payment: o.payment?.method || 'Cash',
       guestName: o.guest_name || null, createdAt: o.created_at,
-    }))),
+    })),
   }
 
   if (existing) {
@@ -715,6 +749,46 @@ app.delete('/api/admin/saved-reports/:id', async (req, res) => {
     const detail = err.response?.data || err.message
     console.error('Delete saved report error:', JSON.stringify(detail))
     res.status(500).json({ error: 'Failed to delete saved report', detail })
+  }
+})
+
+// ===== Network Printing (ESC/POS via TCP) =====
+
+function sendESCPOS(ip, port, text) {
+  return new Promise((resolve, reject) => {
+    const client = new net.Socket()
+    const timeout = 10000
+    client.setTimeout(timeout)
+
+    client.connect(port, ip, () => {
+      client.write(text, 'ascii', (err) => {
+        if (err) { client.destroy(); return reject(new Error('Write failed: ' + err.message)) }
+        client.destroy()
+        resolve()
+      })
+    })
+
+    client.on('error', (err) => {
+      client.destroy()
+      reject(new Error('Connection failed: ' + err.message))
+    })
+
+    client.on('timeout', () => {
+      client.destroy()
+      reject(new Error('Connection timed out after ' + timeout + 'ms'))
+    })
+  })
+}
+
+app.post('/api/print/network', async (req, res) => {
+  const { ip, port, data } = req.body
+  if (!ip || !data) return res.status(400).json({ error: 'Printer IP and data are required' })
+  try {
+    await sendESCPOS(ip, port || 9100, data)
+    res.json({ success: true })
+  } catch (err) {
+    console.error('Network print error:', err.message)
+    res.status(500).json({ error: err.message })
   }
 })
 
