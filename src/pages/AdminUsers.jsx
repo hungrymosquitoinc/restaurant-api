@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { getUsers, toggleUserActive, deleteUser, updateUser, registerCook, getOrphanAuthUsers, deleteAuthUser } from '../data/users'
+import { getUsers, toggleUserActive, deleteUser, updateUser, registerCook, getOrphanAuthUsers, deleteAuthUser, registerAdmin } from '../data/users'
+import { useAuth } from '../contexts/AuthContext'
 import { useOrder } from '../contexts/OrderContext'
 
 const ROLE_COLORS = {
@@ -20,6 +21,10 @@ export default function AdminUsers() {
   const [cookMsg, setCookMsg] = useState('')
   const [orphans, setOrphans] = useState([])
   const [orphanMsg, setOrphanMsg] = useState('')
+  const [showAddAdmin, setShowAddAdmin] = useState(false)
+  const [adminForm, setAdminForm] = useState({ name: '', email: '', password: '' })
+  const [adminMsg, setAdminMsg] = useState('')
+  const { user } = useAuth()
   const { getAllOrders } = useOrder()
 
   const loadOrphans = useCallback(async () => {
@@ -96,13 +101,34 @@ export default function AdminUsers() {
     setShowAddCook(false)
   }
 
+  const handleAddAdmin = async () => {
+    setAdminMsg('')
+    const { name, email, password } = adminForm
+    if (!name || !email || !password) return setAdminMsg('Name, email, and password required')
+    if (password.length < 8) return setAdminMsg('Password must be at least 8 characters')
+    try {
+      await registerAdmin(email, password, name)
+      const updated = await getUsers()
+      setUsers(updated)
+      setAdminForm({ name: '', email: '', password: '' })
+      setShowAddAdmin(false)
+    } catch (e) {
+      setAdminMsg(e.message)
+    }
+  }
+
   const filtered = filter === 'all' ? users : filter === 'active' ? users.filter(u => u.isActive) : users.filter(u => !u.isActive)
 
   return (
     <div className="admin-page">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
         <h1 style={{ margin: 0 }}>User Management</h1>
-        <button className="btn btn-sm btn-primary" onClick={() => setShowAddCook(true)}>+ Add Cook</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {user?.is_super_admin && (
+            <button className="btn btn-sm btn-primary" onClick={() => setShowAddAdmin(true)}>+ Add Admin</button>
+          )}
+          <button className="btn btn-sm btn-primary" onClick={() => setShowAddCook(true)}>+ Add Cook</button>
+        </div>
       </div>
 
       <div className="filter-tabs" style={{ marginBottom: 16 }}>
@@ -215,6 +241,24 @@ export default function AdminUsers() {
             <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
               <button className="btn btn-block" onClick={() => { setShowAddCook(false); setCookMsg('') }}>Cancel</button>
               <button className="btn btn-block btn-primary" onClick={handleAddCook}>Add Cook</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAddAdmin && (
+        <div className="modal-overlay" onClick={() => { setShowAddAdmin(false); setAdminMsg('') }}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2 style={{ marginBottom: 16 }}>Add Admin Account</h2>
+            {adminMsg && <p style={{ color: 'var(--error)', marginBottom: 12 }}>{adminMsg}</p>}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <input className="form-input" value={adminForm.name} onChange={e => setAdminForm(f => ({ ...f, name: e.target.value }))} placeholder="Name" />
+              <input className="form-input" type="email" value={adminForm.email} onChange={e => setAdminForm(f => ({ ...f, email: e.target.value }))} placeholder="Email" />
+              <input className="form-input" type="password" value={adminForm.password} onChange={e => setAdminForm(f => ({ ...f, password: e.target.value }))} placeholder="Password (min 8 characters)" />
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
+              <button className="btn btn-block" onClick={() => { setShowAddAdmin(false); setAdminMsg('') }}>Cancel</button>
+              <button className="btn btn-block btn-primary" onClick={handleAddAdmin}>Add Admin</button>
             </div>
           </div>
         </div>

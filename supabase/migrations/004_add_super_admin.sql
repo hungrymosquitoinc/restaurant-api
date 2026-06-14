@@ -1,8 +1,9 @@
 -- Add super_admin flag to profiles
 alter table profiles add column if not exists is_super_admin boolean default false;
 
--- Mark the original admin as super admin
-update profiles set is_super_admin = true where email = 'admin@a.com';
+-- Mark the original admin as super admin (email is in auth.users, not profiles)
+update profiles set is_super_admin = true
+where id = (select id from auth.users where email = 'admin@a.com');
 
 -- Helper: check if current user is super admin
 create or replace function public.is_super_admin()

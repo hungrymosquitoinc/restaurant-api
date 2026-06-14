@@ -440,6 +440,61 @@ app.get('/api/admin/auth-users', async (req, res) => {
   }
 })
 
+// Admin: List orphan auth users (users without profiles, bypasses RLS)
+app.get('/api/admin/orphan-users', async (req, res) => {
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+  try {
+    const [authRes, profileRes] = await Promise.all([
+      axios.get(`${supabaseConfig.supabaseUrl}/auth/v1/admin/users`, {
+        headers: { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey },
+      }),
+      axios.get(`${supabaseConfig.supabaseUrl}/rest/v1/profiles?select=id`, {
+        headers: { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey },
+      }),
+    ])
+    const authUsers = authRes.data?.users || []
+    const profileIds = new Set((profileRes.data || []).map(p => p.id))
+    const orphans = authUsers
+      .filter(u => !profileIds.has(u.id))
+      .map(u => ({ id: u.id, email: u.email, createdAt: u.created_at, lastSignIn: u.last_sign_in_at }))
+    res.json(orphans)
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('List orphan users error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to list orphan users', detail })
+  }
+})
+
+// Admin: Add a new admin user (creates auth + profile)
+app.post('/api/admin/add-admin', async (req, res) => {
+  const { email, password, name } = req.body
+  if (!email || !password || !name) return res.status(400).json({ error: 'email, password, and name required' })
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+  try {
+    const authRes = await axios.post(
+      `${supabaseConfig.supabaseUrl}/auth/v1/admin/users`,
+      { email, password, email_confirm: true, user_metadata: { name } },
+      { headers: { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey, 'Content-Type': 'application/json' } }
+    )
+    const userId = authRes.data?.user?.id || authRes.data?.id
+    if (!userId) return res.status(500).json({ error: 'Failed to create auth user' })
+    await axios.post(
+      `${supabaseConfig.supabaseUrl}/rest/v1/profiles`,
+      { id: userId, name, role: 'admin', is_active: true },
+      { headers: { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey, 'Content-Type': 'application/json', Prefer: 'return=minimal' } }
+    )
+    res.json({ id: userId, email, name, role: 'admin', isActive: true })
+  } catch (err) {
+    const detail = err.response?.data || err.message
+    console.error('Add admin error:', JSON.stringify(detail))
+    res.status(500).json({ error: 'Failed to add admin', detail })
+  }
+})
+
 // Admin: Delete Supabase auth user
 app.post('/api/admin/delete-user', async (req, res) => {
   const { userId } = req.body

@@ -62,15 +62,16 @@ export async function registerUser(name, email, password, phone) {
 
 export async function getOrphanAuthUsers() {
   try {
-    const authUsers = await apiGet('/admin/auth-users')
-    const { data: profiles } = await supabase.from('profiles').select('id')
-    const profileIds = new Set((profiles || []).map(p => p.id))
-    return authUsers.filter(u => !profileIds.has(u.id))
+    return await apiGet('/admin/orphan-users')
   } catch { return [] }
 }
 
 export async function deleteAuthUser(userId) {
   await apiPost('/admin/delete-user', { userId })
+}
+
+export async function registerAdmin(email, password, name) {
+  return apiPost('/admin/add-admin', { email, password, name })
 }
 
 export async function registerCook(name, email, password, phone) {
