@@ -15,7 +15,8 @@ create table sales_reports (
   payment_methods jsonb default '[]',
   daily_breakdown jsonb default '[]',
   order_details jsonb default '[]',
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  unique(period_date, period_type)
 );
 
 alter table sales_reports enable row level security;

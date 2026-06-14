@@ -563,94 +563,121 @@ app.post('/api/admin/save-report', async (req, res) => {
   if (!periodType) return res.status(400).json({ error: 'periodType required (daily/monthly/quarterly/yearly)' })
 
   try {
-    const { start, end, label } = getPeriodRange(periodType, periodDate)
     const headers = { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey }
-
-    // Fetch orders in date range
-    const ordersRes = await axios.get(
-      `${supabaseConfig.supabaseUrl}/rest/v1/orders?created_at=gte.${start}&created_at=lte.${end}T23:59:59&order=created_at.desc`,
-      { headers }
-    )
-    const orders = ordersRes.data || []
-    const completed = orders.filter(o => o.status !== 'cancelled')
-
-    // Compute stats
-    const totalRevenue = completed.reduce((s, o) => s + parseFloat(o.total || 0), 0)
-    const totalOrders = completed.length
-    const avgOrder = totalOrders > 0 ? totalRevenue / totalOrders : 0
-    const dineIn = completed.filter(o => o.order_type === 'dine-in').length
-    const takeout = completed.filter(o => o.order_type === 'takeout' || !o.order_type).length
-    const guestOrders = completed.filter(o => !o.user_id).length
-
-    const itemCounts = {}
-    completed.forEach(o => (o.items || []).forEach(i => {
-      itemCounts[i.name] = (itemCounts[i.name] || 0) + (i.quantity || 0)
-    }))
-    const popularItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, qty]) => ({ name, qty }))
-
-    const catRevenue = {}
-    completed.forEach(o => (o.items || []).forEach(i => {
-      const cat = i.category || 'Other'
-      catRevenue[cat] = (catRevenue[cat] || 0) + parseFloat(i.price || 0) * (i.quantity || 0)
-    }))
-    const revenueByCategory = Object.entries(catRevenue).map(([cat, rev]) => ({ category: cat, revenue: rev }))
-
-    const paymentMethods = {}
-    completed.forEach(o => {
-      const method = o.payment?.method || 'Cash on Delivery'
-      if (!paymentMethods[method]) paymentMethods[method] = { count: 0, revenue: 0 }
-      paymentMethods[method].count++
-      paymentMethods[method].revenue += parseFloat(o.total || 0)
-    })
-    const paymentMethodsArr = Object.entries(paymentMethods).map(([method, data]) => ({ method, ...data }))
-
-    const dayTotals = {}
-    completed.forEach(o => {
-      const d = new Date(o.created_at).toLocaleDateString()
-      dayTotals[d] = (dayTotals[d] || 0) + 1
-    })
-    const dailyBreakdown = Object.entries(dayTotals).map(([day, count]) => ({ day, count }))
-
-    const orderDetails = completed.map(o => ({
-      id: o.display_id || o.id,
-      total: parseFloat(o.total || 0),
-      items: (o.items || []).map(i => `${i.name} x${i.quantity}`),
-      orderType: o.order_type,
-      payment: o.payment?.method || 'Cash',
-      guestName: o.guest_name || null,
-      createdAt: o.created_at,
-    }))
-
-    // Save to sales_reports table
-    const reportData = {
-      period_date: start,
-      period_type: periodType,
-      label,
-      total_revenue: totalRevenue,
-      total_orders: totalOrders,
-      avg_order_value: avgOrder,
-      dine_in_count: dineIn,
-      takeout_count: takeout,
-      guest_orders: guestOrders,
-      popular_items: JSON.stringify(popularItems),
-      revenue_by_category: JSON.stringify(revenueByCategory),
-      payment_methods: JSON.stringify(paymentMethodsArr),
-      daily_breakdown: JSON.stringify(dailyBreakdown),
-      order_details: JSON.stringify(orderDetails),
-    }
-
-    const saveRes = await axios.post(
-      `${supabaseConfig.supabaseUrl}/rest/v1/sales_reports`,
-      reportData,
-      { headers: { ...headers, 'Content-Type': 'application/json', Prefer: 'return=representation' } }
-    )
-
-    res.json(saveRes.data?.[0] || saveRes.data || { saved: true })
+    const saved = await computeAndSaveReport(periodType, periodDate, headers)
+    res.json(saved)
   } catch (err) {
     const detail = err.response?.data || err.message
     console.error('Save report error:', JSON.stringify(detail))
     res.status(500).json({ error: 'Failed to save report', detail })
   }
+})
+
+// Auto-compute & save report for a given period (used internally and as endpoint)
+async function computeAndSaveReport(periodType, periodDate, headers) {
+  const { start, end, label } = getPeriodRange(periodType, periodDate)
+  const ordersRes = await axios.get(
+    `${supabaseConfig.supabaseUrl}/rest/v1/orders?created_at=gte.${start}&created_at=lte.${end}T23:59:59&order=created_at.desc`,
+    { headers }
+  )
+  const orders = ordersRes.data || []
+  const completed = orders.filter(o => o.status !== 'cancelled')
+
+  const totalRevenue = completed.reduce((s, o) => s + parseFloat(o.total || 0), 0)
+  const totalOrders = completed.length
+  const avgOrder = totalOrders > 0 ? totalRevenue / totalOrders : 0
+  const dineIn = completed.filter(o => o.order_type === 'dine-in').length
+  const takeout = completed.filter(o => o.order_type === 'takeout' || !o.order_type).length
+  const guestOrders = completed.filter(o => !o.user_id).length
+
+  const itemCounts = {}
+  completed.forEach(o => (o.items || []).forEach(i => {
+    itemCounts[i.name] = (itemCounts[i.name] || 0) + (i.quantity || 0)
+  }))
+  const popularItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, qty]) => ({ name, qty }))
+
+  const catRevenue = {}
+  completed.forEach(o => (o.items || []).forEach(i => {
+    const cat = i.category || 'Other'
+    catRevenue[cat] = (catRevenue[cat] || 0) + parseFloat(i.price || 0) * (i.quantity || 0)
+  }))
+  const revenueByCategory = Object.entries(catRevenue).map(([cat, rev]) => ({ category: cat, revenue: rev }))
+
+  const paymentMethods = {}
+  completed.forEach(o => {
+    const method = o.payment?.method || 'Cash on Delivery'
+    if (!paymentMethods[method]) paymentMethods[method] = { count: 0, revenue: 0 }
+    paymentMethods[method].count++
+    paymentMethods[method].revenue += parseFloat(o.total || 0)
+  })
+  const paymentMethodsArr = Object.entries(paymentMethods).map(([method, data]) => ({ method, ...data }))
+
+  const dayTotals = {}
+  completed.forEach(o => {
+    const d = new Date(o.created_at).toLocaleDateString()
+    dayTotals[d] = (dayTotals[d] || 0) + 1
+  })
+  const dailyBreakdown = Object.entries(dayTotals).map(([day, count]) => ({ day, count }))
+
+  // Check existing
+  const existingRes = await axios.get(
+    `${supabaseConfig.supabaseUrl}/rest/v1/sales_reports?period_date=eq.${start}&period_type=eq.${periodType}&select=id`,
+    { headers }
+  )
+  const existing = existingRes.data?.[0]
+
+  const reportData = {
+    period_date: start, period_type: periodType, label,
+    total_revenue: totalRevenue, total_orders: totalOrders, avg_order_value: avgOrder,
+    dine_in_count: dineIn, takeout_count: takeout, guest_orders: guestOrders,
+    popular_items: JSON.stringify(popularItems),
+    revenue_by_category: JSON.stringify(revenueByCategory),
+    payment_methods: JSON.stringify(paymentMethodsArr),
+    daily_breakdown: JSON.stringify(dailyBreakdown),
+    order_details: JSON.stringify(completed.map(o => ({
+      id: o.display_id || o.id, total: parseFloat(o.total || 0),
+      items: (o.items || []).map(i => `${i.name} x${i.quantity}`),
+      orderType: o.order_type, payment: o.payment?.method || 'Cash',
+      guestName: o.guest_name || null, createdAt: o.created_at,
+    }))),
+  }
+
+  if (existing) {
+    await axios.patch(
+      `${supabaseConfig.supabaseUrl}/rest/v1/sales_reports?id=eq.${existing.id}`,
+      reportData,
+      { headers: { ...headers, 'Content-Type': 'application/json' } }
+    )
+    return { ...reportData, id: existing.id }
+  } else {
+    const saveRes = await axios.post(
+      `${supabaseConfig.supabaseUrl}/rest/v1/sales_reports`,
+      reportData,
+      { headers: { ...headers, 'Content-Type': 'application/json', Prefer: 'return=representation' } }
+    )
+    return saveRes.data?.[0] || reportData
+  }
+}
+
+// Auto-save today's report + last 7 days (called when admin visits dashboard)
+app.post('/api/admin/auto-save-reports', async (req, res) => {
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' })
+  }
+  const headers = { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey }
+  const results = []
+  for (let i = 0; i < 7; i++) {
+    const d = new Date()
+    d.setDate(d.getDate() - i)
+    const dateStr = d.toISOString().split('T')[0]
+    try {
+      await computeAndSaveReport('daily', dateStr, headers)
+      results.push({ date: dateStr, saved: true })
+    } catch (err) {
+      results.push({ date: dateStr, error: err.message })
+    }
+  }
+  res.json({ saved: results.length, results })
 })
 
 // List saved reports

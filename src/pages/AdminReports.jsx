@@ -47,7 +47,11 @@ export default function AdminReports() {
   const [viewingReport, setViewingReport] = useState(null)
   const printRef = useRef(null)
 
-  useEffect(() => { getSavedReports().then(setSavedReports).catch(() => {}) }, [])
+  useEffect(() => {
+    // Auto-save reports for last 7 days on page load
+    fetch('/api/admin/auto-save-reports', { method: 'POST' }).catch(() => {})
+    getSavedReports().then(setSavedReports).catch(() => {})
+  }, [])
 
   const handleSaveReport = async () => {
     const typeMap = { today: 'daily', week: 'daily', month: 'monthly', year: 'yearly', all: 'yearly', custom: 'daily' }
