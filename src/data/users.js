@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase'
+import { apiGet, apiPost } from '../lib/api'
 
 function normalizeProfile(p) {
   return { ...p, isActive: p.is_active }
@@ -23,13 +24,10 @@ export async function deleteUser(userId) {
   if (!profile || profile.role === 'admin') return null
   const { error: profileError } = await supabase.from('profiles').delete().eq('id', userId)
   if (profileError) throw profileError
-  const res = await fetch('/api/admin/delete-user', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userId }),
-  })
-  if (!res.ok) {
-    console.warn('Auth user deletion failed (start backend with: npm run dev:backend)')
+  try {
+    await apiPost('/admin/delete-user', { userId })
+  } catch (e) {
+    console.warn('Auth user deletion failed:', e.message)
   }
   return getUsers()
 }
@@ -64,9 +62,7 @@ export async function registerUser(name, email, password, phone) {
 
 export async function getOrphanAuthUsers() {
   try {
-    const res = await fetch('/api/admin/auth-users')
-    if (!res.ok) return []
-    const authUsers = await res.json()
+    const authUsers = await apiGet('/admin/auth-users')
     const { data: profiles } = await supabase.from('profiles').select('id')
     const profileIds = new Set((profiles || []).map(p => p.id))
     return authUsers.filter(u => !profileIds.has(u.id))
@@ -74,15 +70,7 @@ export async function getOrphanAuthUsers() {
 }
 
 export async function deleteAuthUser(userId) {
-  const res = await fetch('/api/admin/delete-user', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userId }),
-  })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.error || 'Failed to delete auth user')
-  }
+  await apiPost('/admin/delete-user', { userId })
 }
 
 export async function registerCook(name, email, password, phone) {
