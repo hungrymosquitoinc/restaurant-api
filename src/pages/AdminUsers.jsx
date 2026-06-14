@@ -4,6 +4,7 @@ import { useOrder } from '../contexts/OrderContext'
 
 const ROLE_COLORS = {
   admin: { bg: '#fce4ec', color: '#c62828' },
+  superadmin: { bg: '#f3e5f5', color: '#6a1b9a' },
   cook: { bg: '#e8f5e9', color: '#2e7d32' },
   user: { bg: '#e3f2fd', color: '#1565c0' },
 }
@@ -54,10 +55,11 @@ export default function AdminUsers() {
   const handleToggle = async (id) => {
     const updated = await toggleUserActive(id)
     if (updated) setUsers(updated)
+    loadOrphans()
   }
 
   const handleDelete = (user) => {
-    if (user.role === 'admin') return
+    if (user.role === 'admin' || user.isSuperAdmin) return
     setDeleteTarget(user)
   }
 
@@ -136,7 +138,7 @@ export default function AdminUsers() {
                     fontSize: '0.7rem', fontWeight: 700, padding: '2px 8px', borderRadius: 10,
                     background: rc.bg, color: rc.color, textTransform: 'uppercase',
                   }}>
-                    {u.role}
+                    {u.isSuperAdmin ? 'Super Admin' : u.role}
                   </span>
                 </div>
               </div>
@@ -151,7 +153,7 @@ export default function AdminUsers() {
                     ✏
                   </button>
                 )}
-                {u.role !== 'admin' && (
+                {u.role !== 'admin' && !u.isSuperAdmin && (
                   <button className="btn btn-sm btn-danger" onClick={() => handleDelete(u)}
                     style={{ minWidth: 44, padding: '8px 12px', fontSize: '1rem' }}>
                     🗑

@@ -2,7 +2,7 @@ import { supabase } from '../lib/supabase'
 import { apiGet, apiPost } from '../lib/api'
 
 function normalizeProfile(p) {
-  return { ...p, isActive: p.is_active }
+  return { ...p, isActive: p.is_active, isSuperAdmin: p.is_super_admin }
 }
 
 export async function getUsers() {
