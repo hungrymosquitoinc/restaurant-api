@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 const axios = require('axios');
+const jwt = require('jsonwebtoken');
+const jwksClient = require('jwks-rsa');
 
 // Load Supabase config (env vars take precedence over config file)
 let supabaseConfig = {
@@ -55,6 +57,63 @@ function writePayments(data) {
 app.use(cors());
 app.use(express.json());
 
+// --- JWT Verification ---
+const jwks = jwksClient({ jwksUri: 'https://pusdssjwtjdkcdgslopc.supabase.co/auth/v1/.well-known/jwks.json' });
+
+function getKey(header, callback) {
+  jwks.getSigningKey(header.kid, (err, key) => {
+    if (err) return callback(err);
+    callback(null, key.publicKey);
+  });
+}
+
+function verifyToken(token) {
+  return new Promise((resolve, reject) => {
+    jwt.verify(token, getKey, { algorithms: ['ES256'] }, (err, decoded) => {
+      if (err) return reject(err);
+      resolve(decoded);
+    });
+  });
+}
+
+// Middleware: reject if not authenticated
+async function requireAuth(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    req.user = await verifyToken(auth.slice(7));
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+// Middleware: verify user is admin/super admin in Supabase
+async function requireAdmin(req, res, next) {
+  if (!supabaseConfig.supabaseUrl || !supabaseConfig.serviceRoleKey) {
+    return res.status(500).json({ error: 'Supabase admin not configured' });
+  }
+  try {
+    const response = await axios.get(
+      supabaseConfig.supabaseUrl + '/rest/v1/profiles?id=eq.' + req.user.sub + '&select=role,is_super_admin',
+      { headers: { Authorization: 'Bearer ' + supabaseConfig.serviceRoleKey, apikey: supabaseConfig.serviceRoleKey } }
+    );
+    const profile = response.data?.[0];
+    if (!profile || (profile.role !== 'admin' && !profile.is_super_admin)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    req.profile = profile;
+    next();
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to verify admin status' });
+  }
+}
+
+// Apply both middlewares to all /api/admin/, /api/auth/ routes
+app.use('/api/admin', requireAuth, requireAdmin);
+
 function readDB() {
   return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
 }
@@ -62,6 +121,21 @@ function readDB() {
 function writeDB(data) {
   fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
 }
+
+// Check current user
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${supabaseConfig.supabaseUrl}/rest/v1/profiles?id=eq.${req.user.sub}`,
+      { headers: { Authorization: `Bearer ${supabaseConfig.serviceRoleKey}`, apikey: supabaseConfig.serviceRoleKey } }
+    );
+    const profile = response.data?.[0];
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    res.json({ id: req.user.sub, email: req.user.email, ...profile });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
 
 // Auth endpoint
 app.post('/api/login', (req, res) => {
